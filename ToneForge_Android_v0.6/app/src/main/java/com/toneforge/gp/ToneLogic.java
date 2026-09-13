@@ -459,7 +459,7 @@ final class ToneLogic {
         for(int i=0;i<a.length();i++){JSONObject o=a.optJSONObject(i);if(o!=null)out.add(o);} return out;
     }
     // ---------------------------------------------------------------------
-    // v0.8 native .prst builder
+    // v0.9 hybrid native .prst builder
     // Format details/blank preset/conversion logic derived from
     // drewmerc302/valeton-gp50 (MIT), Copyright (c) 2026 Andrew Mercurio.
     // The project reverse-engineered GP-50 / GP-5 .prst files and verified its
@@ -535,6 +535,30 @@ final class ToneLogic {
     private static final int FX_RVB_PLATE_L=201326608;
     private static final int FX_SNAPTONE_1=251658240;
 
+    static final class AudioProfile {
+        final int brightness, gain, body, space, echoMs;
+        final double echoConfidence, confidence;
+        final boolean isolatedGuitar;
+        final long seconds;
+
+        AudioProfile(int brightness,int gain,int body,int space,int echoMs,double echoConfidence,
+                     double confidence,boolean isolatedGuitar,long seconds) {
+            this.brightness=clamp100(brightness); this.gain=clamp100(gain); this.body=clamp100(body);
+            this.space=clamp100(space); this.echoMs=Math.max(0,echoMs);
+            this.echoConfidence=Math.max(0,Math.min(1,echoConfidence));
+            this.confidence=Math.max(0,Math.min(1,confidence));
+            this.isolatedGuitar=isolatedGuitar; this.seconds=Math.max(0,seconds);
+        }
+
+        String summary() {
+            String d=echoMs>0 && echoConfidence>0.08 ? (echoMs+" ms") : "non certo";
+            return "Brightness "+brightness+" • Gain "+gain+" • Body "+body+" • Space "+space+
+                    " • Echo "+d+" • conf. "+Math.round(confidence*100)+"%";
+        }
+    }
+
+    private static int clamp100(int v){return Math.max(0,Math.min(100,v));}
+
     static final class NativePreset {
         final String label, shortLabel, patchName, summary;
         final byte[] bytes;
@@ -555,9 +579,13 @@ final class ToneLogic {
     }
 
     static List<NativePreset> buildNativePresets(String query,String device) {
+        return buildNativePresets(query,device,null,"Auto");
+    }
+
+    static List<NativePreset> buildNativePresets(String query,String device,AudioProfile audio,String pickup) {
         if(query==null||query.trim().isEmpty()) throw new IllegalArgumentException("Scrivi artista e brano");
         String dev="GP5".equalsIgnoreCase(device)?"GP5":"GP50";
-        NativeModels rig=nativeModelsFor(query);
+        NativeModels rig=nativeModelsFor(query,audio);
         SceneRecipe[] scenes=sceneRecipes(query);
         List<NativePreset> out=new ArrayList<>();
         for(int i=0;i<3;i++) {
@@ -592,6 +620,7 @@ final class ToneLogic {
             writeLe32(gp50,bb,mask);
 
             // Gate / compressor.
+            float audioW=audioWeight(audio);
             setParam(gp50,pb,BLK_NR,0,rig.gate?(has(norm(query),"metallica","metal","high gain")?38f:30f):50f);
             setParam(gp50,pb,BLK_PRE,0,rig.compressor?18f:20f);
             setParam(gp50,pb,BLK_PRE,1,50f);
@@ -601,31 +630,39 @@ final class ToneLogic {
                 setParam(gp50,pb,BLK_DST,0, i==0?48f:(i==1?60f:72f));
                 setParam(gp50,pb,BLK_DST,1, i==2?62f:56f);
             } else {
-                setParam(gp50,pb,BLK_DST,0,scene.odGain);
-                setParam(gp50,pb,BLK_DST,1,scene.odTone);
+                float odGain=scene.odGain + audioDelta(audio==null?50:audio.gain,50,6f,audioW);
+                float odTone=scene.odTone + audioDelta(audio==null?50:audio.brightness,50,5f,audioW);
+                setParam(gp50,pb,BLK_DST,0,clampf(odGain,0,100));
+                setParam(gp50,pb,BLK_DST,1,clampf(odTone,0,100));
                 setParam(gp50,pb,BLK_DST,2,scene.odVol);
             }
 
-            applyAmpParams(gp50,pb,rig.amp,query,i);
+            applyAmpParams(gp50,pb,rig.amp,query,i,audio,pickup);
             setParam(gp50,pb,BLK_CAB,0,50f);
 
             // Guitar EQs are true +/- 50 dB-style values in the file, not 0..100.
             for(int band=0;band<5;band++) {
                 float v=Math.max(-50,Math.min(50,scene.eq[band]-50));
+                if(audio!=null) {
+                    if(band<=1) v += audioDelta(audio.body,50,4.5f,audioW);
+                    if(band==2) v += audioDelta(audio.body,50,2.5f,audioW);
+                    if(band>=3) v += audioDelta(audio.brightness,50,5.5f,audioW);
+                }
+                v += pickupEqDelta(pickup,band);
                 if(rig.eq==FX_MESS_EQ && band==2) v += (i<2?-8f:-3f); // classic restrained V, not cartoonishly scooped
-                setParam(gp50,pb,BLK_EQ,band,v);
+                setParam(gp50,pb,BLK_EQ,band,clampf(v,-50,50));
             }
             if(rig.eq==FX_GUITAR_EQ1)setParam(gp50,pb,BLK_EQ,5,50f);
 
             applyModParams(gp50,pb,rig.mod,query,i);
             int dlyId=delayForScene(query,rig,i);
             setParam(gp50,pb,BLK_DLY,0,scene.delayOn?scene.delayMix:(forceDelayForScene(query,i)?12f:8f));
-            setParam(gp50,pb,BLK_DLY,1,delayTimeForScene(query,scene,i));
+            setParam(gp50,pb,BLK_DLY,1,delayTimeForScene(query,scene,i,audio));
             setParam(gp50,pb,BLK_DLY,2,scene.delayFeedback);
             setParam(gp50,pb,BLK_DLY,4,1f); // Trail is algId 4 on Pure/Analog/Tape/Slapback
 
             int rvbId=reverbForScene(query,rig,i);
-            setParam(gp50,pb,BLK_RVB,0,reverbMixForScene(query,scene,i));
+            setParam(gp50,pb,BLK_RVB,0,reverbMixForScene(query,scene,i,audio));
             if(rvbId==FX_RVB_SPRING){
                 setParam(gp50,pb,BLK_RVB,1,Math.max(20,scene.reverbDecay));
                 setParam(gp50,pb,BLK_RVB,3,1f);
@@ -642,13 +679,14 @@ final class ToneLogic {
             byte[] finalBytes="GP5".equals(dev)?convertGp50ToGp5(gp50):gp50;
             String summary=scene.label+" · "+rig.ampName+" → "+rig.cabName+
                     " · "+(odOn?rig.dstName+" ON":"drive OFF")+
-                    (modOn?" · "+rig.modName:"")+" · "+rig.style;
+                    (modOn?" · "+rig.modName:"")+" · "+rig.style+
+                    (audio==null?"":" · AudioMatch "+Math.round(audio.confidence*100)+"%");
             out.add(new NativePreset(scene.label,scene.shortLabel,patchName,summary,finalBytes));
         }
         return out;
     }
 
-    private static NativeModels nativeModelsFor(String query){
+    private static NativeModels nativeModelsFor(String query,AudioProfile audio){
         String q=norm(query);
         if(has(q,"metallica","enter sandman","master of puppets","metal","rectifier","high gain"))
             return new NativeModels(FX_MESS_DUALM,"Mess DualM",FX_MESS_4X12,"Mess 4x12",FX_GREEN_OD,"Green OD",FX_MESS_EQ,FX_A_CHORUS,"A-Chorus",FX_DELAY_PURE,FX_RVB_ROOM,false,true,"tight modern/high-gain");
@@ -680,28 +718,45 @@ final class ToneLogic {
             return new NativeModels(FX_UK50JP,"UK 50JP",FX_UK_GRN_4X12,"UK GRN 4x12",FX_GREEN_OD,"Green OD",FX_GUITAR_EQ1,FX_A_CHORUS,"A-Chorus",FX_DELAY_ANALOG,FX_RVB_ROOM,false,false,"dry open Plexi crunch");
         if(has(q,"jcm800","80s rock","hard rock"))
             return new NativeModels(FX_UK800,"UK 800",FX_UK_GRN_4X12,"UK GRN 4x12",FX_GREEN_OD,"Green OD",FX_GUITAR_EQ1,FX_A_CHORUS,"A-Chorus",FX_DELAY_ANALOG,FX_RVB_PLATE,false,false,"JCM800 hard rock");
+        // Unknown title: let reference audio select only the broad topology.
+        // This is intentionally conservative; a mastered mix cannot uniquely identify an amp.
+        if(audio!=null) {
+            if(audio.gain>=72)
+                return new NativeModels(FX_MESS_DUALM,"Mess DualM",FX_MESS_4X12,"Mess 4x12",FX_GREEN_OD,"Green OD",FX_MESS_EQ,FX_A_CHORUS,"A-Chorus",FX_DELAY_PURE,FX_RVB_ROOM,false,true,"audio-assisted high gain");
+            if(audio.gain<=28 && audio.brightness>=55)
+                return new NativeModels(FX_J120,"J-120 CL",FX_J120_2X12,"J-120 2x12",FX_GREEN_OD,"Green OD",FX_GUITAR_EQ1,FX_A_CHORUS,"A-Chorus",FX_DELAY_SLAP,FX_RVB_ROOM,true,false,"audio-assisted bright clean");
+            if(audio.gain<=42 && audio.body>=55)
+                return new NativeModels(FX_DARK_TWIN,"Dark Twin",FX_DARK_TWIN_2X12,"Dark Twin 2x12",FX_GREEN_OD,"Green OD",FX_GUITAR_EQ1,FX_A_CHORUS,"A-Chorus",FX_DELAY_ANALOG,FX_RVB_SPRING,true,false,"audio-assisted clean/edge");
+            if(audio.gain>=55)
+                return new NativeModels(FX_UK800,"UK 800",FX_UK_GRN_4X12,"UK GRN 4x12",FX_GREEN_OD,"Green OD",FX_GUITAR_EQ1,FX_A_CHORUS,"A-Chorus",FX_DELAY_ANALOG,FX_RVB_PLATE,false,false,"audio-assisted driven British");
+        }
         return new NativeModels(FX_UK45,"UK 45",FX_UK_GRN_4X12,"UK GRN 4x12",FX_GREEN_OD,"Green OD",FX_GUITAR_EQ1,FX_A_CHORUS,"A-Chorus",FX_DELAY_ANALOG,FX_RVB_PLATE,false,false,"versatile rock/blues");
     }
 
-    private static void applyAmpParams(byte[] b,int pb,int amp,String query,int scene){
+    private static void applyAmpParams(byte[] b,int pb,int amp,String query,int scene,AudioProfile audio,String pickup){
         String q=norm(query);
         float g=scene==0?35f:(scene==1?45f:55f);
         if(has(q,"ac/dc","angus","back in black"))g=scene==0?34f:(scene==1?40f:46f);
         if(has(q,"slash","sweet child","gary moore","bonamassa"))g=scene==0?44f:(scene==1?52f:58f);
         if(has(q,"metallica","metal","high gain"))g=scene==0?54f:(scene==1?58f:62f);
+        float w=audioWeight(audio);
+        if(audio!=null) g += audioDelta(audio.gain,50,8f,w);
+        g += pickupGainDelta(pickup);
+        g=clampf(g,5f,85f);
+        float brightAdj=audio==null?0:audioDelta(audio.brightness,50,5f,w);
         if(amp==FX_DARK_TWIN){
             setParam(b,pb,BLK_AMP,0,has(q,"gilmour")?35f:30f);setParam(b,pb,BLK_AMP,1,52f);
-            setParam(b,pb,BLK_AMP,2,45f);setParam(b,pb,BLK_AMP,3,scene==2?48f:42f);setParam(b,pb,BLK_AMP,4,62f);setParam(b,pb,BLK_AMP,5,1f);
+            setParam(b,pb,BLK_AMP,2,45f);setParam(b,pb,BLK_AMP,3,scene==2?48f:42f);setParam(b,pb,BLK_AMP,4,clampf(62f+brightAdj,0,100));setParam(b,pb,BLK_AMP,5,1f);
         } else if(amp==FX_J120){
             setParam(b,pb,BLK_AMP,0,55f);setParam(b,pb,BLK_AMP,1,48f);setParam(b,pb,BLK_AMP,2,50f);setParam(b,pb,BLK_AMP,3,62f);setParam(b,pb,BLK_AMP,4,1f);
         } else if(amp==FX_UK50JP){
             setParam(b,pb,BLK_AMP,0,g);setParam(b,pb,BLK_AMP,1,58f);setParam(b,pb,BLK_AMP,2,52f);
-            setParam(b,pb,BLK_AMP,3,44f);setParam(b,pb,BLK_AMP,4,scene==2?62f:56f);setParam(b,pb,BLK_AMP,5,58f);setParam(b,pb,BLK_AMP,6,scene==2?55f:48f);
+            setParam(b,pb,BLK_AMP,3,44f);setParam(b,pb,BLK_AMP,4,clampf((scene==2?62f:56f)+brightAdj,0,100));setParam(b,pb,BLK_AMP,5,clampf(58f+brightAdj*0.5f,0,100));setParam(b,pb,BLK_AMP,6,scene==2?55f:48f);
         } else if(amp==FX_UK45||amp==FX_UK800||amp==FX_LSTAR_CL||amp==FX_BELLMAN_59B||amp==FX_BAD_KT_OD||amp==FX_MESS_DUALM||amp==FX_FLAGMAN_PLUS){
             setParam(b,pb,BLK_AMP,0,g);setParam(b,pb,BLK_AMP,1,55f);setParam(b,pb,BLK_AMP,2,52f);
-            setParam(b,pb,BLK_AMP,3,amp==FX_MESS_DUALM?44f:46f);setParam(b,pb,BLK_AMP,4,amp==FX_MESS_DUALM?42f:(scene==2?58f:52f));setParam(b,pb,BLK_AMP,5,57f);
+            setParam(b,pb,BLK_AMP,3,amp==FX_MESS_DUALM?44f:46f);setParam(b,pb,BLK_AMP,4,clampf((amp==FX_MESS_DUALM?42f:(scene==2?58f:52f))+brightAdj,0,100));setParam(b,pb,BLK_AMP,5,clampf(57f+brightAdj*0.5f,0,100));
         } else if(amp==FX_FOXY_30TB){
-            setParam(b,pb,BLK_AMP,0,scene==0?32f:(scene==1?40f:48f));setParam(b,pb,BLK_AMP,1,46f);setParam(b,pb,BLK_AMP,2,52f);setParam(b,pb,BLK_AMP,3,48f);setParam(b,pb,BLK_AMP,4,60f);setParam(b,pb,BLK_AMP,5,0f);
+            setParam(b,pb,BLK_AMP,0,scene==0?32f:(scene==1?40f:48f));setParam(b,pb,BLK_AMP,1,46f);setParam(b,pb,BLK_AMP,2,52f);setParam(b,pb,BLK_AMP,3,48f);setParam(b,pb,BLK_AMP,4,clampf(60f+brightAdj,0,100));setParam(b,pb,BLK_AMP,5,0f);
         } else if(amp==FX_EV51){
             setParam(b,pb,BLK_AMP,0,g);setParam(b,pb,BLK_AMP,1,52f);setParam(b,pb,BLK_AMP,2,45f);setParam(b,pb,BLK_AMP,3,48f);setParam(b,pb,BLK_AMP,4,58f);setParam(b,pb,BLK_AMP,6,55f);
         }
@@ -737,18 +792,52 @@ final class ToneLogic {
         if(has(q,"ac/dc","metallica","clean","funk"))return FX_RVB_ROOM;
         return rig.reverb;
     }
-    private static float delayTimeForScene(String query,SceneRecipe scene,int i){
+    private static float delayTimeForScene(String query,SceneRecipe scene,int i,AudioProfile audio){
         String q=norm(query);
-        if(has(q,"gilmour","comfortably numb"))return i==0?360f:(i==1?420f:470f);
-        if(has(q,"knopfler","sultans")&&i<2)return i==0?95f:110f;
-        return Math.max(20,scene.delayMs);
+        float base;
+        boolean strongPrior=false;
+        if(has(q,"gilmour","comfortably numb")){base=i==0?360f:(i==1?420f:470f);strongPrior=true;}
+        else if(has(q,"knopfler","sultans")&&i<2){base=i==0?95f:110f;strongPrior=true;}
+        else base=Math.max(20,scene.delayMs);
+        if(audio!=null && audio.echoMs>=70 && audio.echoMs<=650 && audio.echoConfidence>=0.18) {
+            double trust=audio.echoConfidence * (audio.isolatedGuitar?0.80:0.35) * (strongPrior?0.45:1.0);
+            base=(float)(base*(1-trust)+audio.echoMs*trust);
+        }
+        return clampf(base,20,1000);
     }
-    private static float reverbMixForScene(String query,SceneRecipe scene,int i){
+    private static float reverbMixForScene(String query,SceneRecipe scene,int i,AudioProfile audio){
         String q=norm(query);
-        if(has(q,"ac/dc"))return i==2?10f:7f;
-        if(has(q,"metallica"))return i==2?13f:7f;
-        return Math.max(8,Math.min(32,scene.reverbMix));
+        float base;
+        if(has(q,"ac/dc"))base=i==2?10f:7f;
+        else if(has(q,"metallica"))base=i==2?13f:7f;
+        else base=Math.max(8,Math.min(32,scene.reverbMix));
+        if(audio!=null) base += audioDelta(audio.space,50,6f,audioWeight(audio));
+        return clampf(base,5,38);
     }
+
+    private static float audioWeight(AudioProfile a){
+        if(a==null)return 0f;
+        double source=a.isolatedGuitar?1.0:0.52;
+        return (float)Math.max(0,Math.min(0.90,a.confidence*source));
+    }
+    private static float audioDelta(int value,int neutral,float max,float weight){
+        return ((value-neutral)/50f)*max*weight;
+    }
+    private static float pickupGainDelta(String pickup){
+        String p=norm(pickup);
+        if(p.contains("single"))return 3f;
+        if(p.contains("humb"))return -2f;
+        if(p.contains("p90"))return -1f;
+        return 0f;
+    }
+    private static float pickupEqDelta(String pickup,int band){
+        String p=norm(pickup);
+        if(p.contains("single")) return band<=1?1.5f:(band>=3?-1.5f:0f);
+        if(p.contains("humb")) return band<=1?-1.5f:(band>=3?1.5f:0f);
+        if(p.contains("p90")) return band==2?1f:0f;
+        return 0f;
+    }
+    private static float clampf(float v,float lo,float hi){return Math.max(lo,Math.min(hi,v));}
 
     private static String nativePatchName(String query,String suffix){
         String base=safeName(query).replace('_',' ');
