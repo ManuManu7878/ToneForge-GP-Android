@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
             try {
                 T3Client.SelectResult selection=t3.finishSelectOAuth(u);
                 if(selection.canceled){
-                    runOnUiThread(() -> {status.setText("TONE3000 chiuso • modalità nativa sempre disponibile"); result.setText("Nessun tone selezionato. Puoi continuare con ANALIZZA NATIVO senza TONE3000.");});
+                    runOnUiThread(() -> {status.setText("TONE3000 chiuso • modalità nativa sempre disponibile"); result.setText("Nessun tone selezionato. Puoi continuare a generare preset nativi senza TONE3000.");});
                     return;
                 }
                 processSelectedTone(selection.toneId);
@@ -83,19 +83,19 @@ public class MainActivity extends Activity {
         ScrollView sc=new ScrollView(this); sc.setFillViewport(true); sc.setBackgroundColor(Color.rgb(13,16,22));
         LinearLayout root=new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(18),dp(18),dp(18),dp(28)); sc.addView(root);
 
-        TextView title=tv("ToneForge GP · v0.7",30,Color.rgb(238,244,251)); title.setTypeface(null,1); root.addView(title);
-        TextView sub=tv("GP-5 / GP-50 • modalità NATIVA subito disponibile • TONE3000 opzionale",13,Color.rgb(155,168,187)); root.addView(sub);
+        TextView title=tv("ToneForge GP · v0.8",30,Color.rgb(238,244,251)); title.setTypeface(null,1); root.addView(title);
+        TextView sub=tv("GP-5 / GP-50 • genera .prst NATIVI pronti • TONE3000 opzionale",13,Color.rgb(155,168,187)); root.addView(sub);
         status=panel("Modalità nativa pronta."); root.addView(status,lpTop(12));
 
         root.addView(section("Artista / brano"),lpTop(18));
         query=input("es. Slash - Sweet Child O' Mine solo");root.addView(query);
-        nativeAuto=button("ANALIZZA NATIVO • nessun login richiesto");root.addView(nativeAuto,lpTop(8));
+        nativeAuto=button("GENERA 3 PRESET PRONTI (.prst)");root.addView(nativeAuto,lpTop(8));
         nativeAuto.setOnClickListener(v -> runNative());
 
         root.addView(section("Pedale"),lpTop(18));
         device=new Spinner(this); String[] devs={"GP50","GP5"}; ArrayAdapter<String>a=new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,devs);device.setAdapter(a); root.addView(device);
 
-        result=panel("Scrivi artista e brano, poi premi ANALIZZA NATIVO.");result.setTextIsSelectable(true);root.addView(result,lpTop(12));
+        result=panel("Scrivi artista e brano: ToneForge crea RHYTHM / MAIN / LEAD pronti da importare nella Valeton Suite.");result.setTextIsSelectable(true);root.addView(result,lpTop(12));
 
         root.addView(section("TONE3000 · opzionale"),lpTop(20));
         TextView t3Info=tv("Usalo solo se vuoi un NAM/SnapTone. ToneForge apre il catalogo ufficiale TONE3000: scegli tu il tone, poi l'app scarica il modello selezionato. La modalità nativa non richiede TONE3000.",13,Color.rgb(203,213,225));root.addView(t3Info);
@@ -109,11 +109,9 @@ public class MainActivity extends Activity {
         slots.addView(boxed("SnapTone slot",snapSlot),new LinearLayout.LayoutParams(0,LinearLayout.LayoutParams.WRAP_CONTENT,1));
         slots.addView(boxed("3 preset consecutivi",presetSlot),new LinearLayout.LayoutParams(0,LinearLayout.LayoutParams.WRAP_CONTENT,1)); root.addView(slots,lpTop(8));
 
-        root.addView(section("Template .prst · solo per SnapTone"),lpTop(18));
-        TextView explain=tv("Opzionale. Importa una volta un tuo .prst con SnapTone attivo: ToneForge può creare tre preset RHYTHM / MAIN / LEAD per il NAM scelto.",13,Color.rgb(203,213,225)); root.addView(explain);
-        importTemplate=button("Importa template .prst"); root.addView(importTemplate,lpTop(8));
-        templateStatus=panel(""); root.addView(templateStatus,lpTop(8));
-        importTemplate.setOnClickListener(v -> pickTemplate());
+        root.addView(section("SnapTone automatico"),lpTop(18));
+        TextView explain=tv("Nessun template .prst richiesto: se scegli un NAM su TONE3000, ToneForge genera da zero i tre preset RHYTHM / MAIN / LEAD che puntano allo slot SnapTone scelto.",13,Color.rgb(203,213,225)); root.addView(explain);
+        templateStatus=panel("✓ Generatore .prst integrato v0.8"); root.addView(templateStatus,lpTop(8));
 
         sendA2=button("Apri A2 Lite scelto nella Valeton Suite");
         sendFallback=button("Apri A1 Legacy corrispondente");
@@ -130,24 +128,39 @@ public class MainActivity extends Activity {
         sendScene3.setOnClickListener(v -> shareToValeton(lastSceneUris[2],lastSceneNames[2]));
         openValeton.setOnClickListener(v -> launchValeton());
 
-        TextView note=tv("v0.7 non forza più TONE3000. Per i preset NATIVI mostra AMP/CAB ed effetti da impostare in Valeton Suite. I .prst automatici restano riservati al percorso SnapTone, perché modificare alla cieca gli ID proprietari AMP/CAB non sarebbe affidabile.",12,Color.rgb(120,134,154)); root.addView(note,lpTop(18));
+        TextView note=tv("v0.8 genera direttamente preset NATIVI .prst validi per GP-50 e GP-5: AMP, CAB, drive, EQ, modulazioni, delay e reverb vengono scritti nel file con CRC corretto. TONE3000 resta un'alternativa opzionale per SnapTone/NAM. Formato .prst basato sul progetto open-source valeton-gp50 (MIT).",12,Color.rgb(120,134,154)); root.addView(note,lpTop(18));
         return sc;
     }
 
     private void runNative() {
-        final String q=query.getText().toString().trim(); if(q.isEmpty()){toast("Scrivi artista e brano");return;}
-        final String dev=(String)device.getSelectedItem();prefs.edit().putString("device",dev).apply();
-        ToneLogic.Profile profile=ToneLogic.profileFor(q);
-        ToneLogic.NativeRig rig=ToneLogic.nativeRigFor(q);
-        ToneLogic.SceneRecipe[] scenes=ToneLogic.sceneRecipes(q+" "+profile.name+" "+profile.recipe);
-        StringBuilder sceneText=new StringBuilder();
-        for(ToneLogic.SceneRecipe scene:scenes)sceneText.append("\n• ").append(scene.summary());
-        String out="NATIVO "+dev+"\n\n"+rig.summary()+"\n\n"+
-                "PROFILO\n"+profile.name+"\n"+profile.recipe.replace("SnapTone","Catena")+"\n\n"+
-                "3 SCENE CONSIGLIATE"+sceneText+"\n\n"+
-                "Imposta AMP/CAB nativi in Valeton Suite e usa queste tre varianti per OD, EQ, delay e reverb. Se vuoi confrontare un capture reale, usa il pulsante TONE3000 opzionale qui sotto.";
-        status.setText("✓ Analisi nativa pronta • TONE3000 non necessario");
-        result.setText(out);
+        final String q=query.getText().toString().trim();
+        if(q.isEmpty()){toast("Scrivi artista e brano");return;}
+        final String dev=(String)device.getSelectedItem();
+        prefs.edit().putString("device",dev).apply();
+        setBusy("Genero 3 preset "+dev+" con modelli nativi Valeton…");
+        io.execute(() -> {
+            try {
+                List<ToneLogic.NativePreset> presets=ToneLogic.buildNativePresets(q,dev);
+                StringBuilder out=new StringBuilder();
+                out.append("PRESET NATIVI ").append(dev).append(" · pronti da importare\n\n");
+                for(int i=0;i<3;i++){
+                    ToneLogic.NativePreset p=presets.get(i);
+                    String fileName="ToneForge_"+ToneLogic.safeName(q)+"_"+p.shortLabel+"_"+dev+".prst";
+                    Uri uri=saveDownload(fileName,p.bytes,"application/octet-stream");
+                    lastSceneUris[i]=uri;lastSceneNames[i]=fileName;
+                    out.append(i+1).append(". ").append(p.summary).append("\n   file: ").append(fileName).append("\n\n");
+                }
+                out.append("Tocca uno dei tre pulsanti qui sotto per inviare il .prst alla Valeton Suite. Non serve TONE3000 per questi preset.");
+                runOnUiThread(() -> {
+                    result.setText(out.toString());
+                    status.setText("✓ 3 preset .prst creati in Download/ToneForge");
+                    sendScene1.setText("Apri RHYTHM in Valeton");
+                    sendScene2.setText("Apri MAIN in Valeton");
+                    sendScene3.setText("Apri LEAD in Valeton");
+                    sendScene1.setVisibility(View.VISIBLE);sendScene2.setVisibility(View.VISIBLE);sendScene3.setVisibility(View.VISIBLE);
+                });
+            } catch(Exception e){showError("Preset nativo: "+e.getMessage());}
+        });
     }
 
     private void startTone3000Select(){
@@ -199,24 +212,17 @@ public class MainActivity extends Activity {
 
         ToneLogic.Profile profile=ToneLogic.profileFor(q);
         ToneLogic.NativeRig nativeRig=ToneLogic.nativeRigFor(q);
-        String presetInfo;
         StringBuilder sceneInfo=new StringBuilder();
         for(int i=0;i<3;i++){lastSceneUris[i]=null;lastSceneNames[i]="";}
-        File tpl=templateFile(dev);
-        if(tpl.exists()) {
-            byte[] raw=readFile(tpl);
-            List<ToneLogic.GeneratedScene> scenes=ToneLogic.buildThreeScenes(raw,dev,snap,q,profile.name+" "+profile.recipe+" "+ToneLogic.blob(tone));
-            for(int i=0;i<scenes.size();i++) {
-                ToneLogic.GeneratedScene scene=scenes.get(i);int slot=pslot+i;
-                String fileName=String.format(Locale.ROOT,"%02d-%s_%s_%s.prst",slot,ToneLogic.safeName(q),scene.shortLabel,dev);
-                Uri uri=saveDownload(fileName,scene.bytes,"application/octet-stream");
-                lastSceneUris[i]=uri;lastSceneNames[i]=fileName;
-                sceneInfo.append("\n").append(slot).append(" · ").append(scene.summary);
-            }
-            presetInfo="3 preset SnapTone creati per lo slot "+snap+":"+sceneInfo;
-        } else {
-            presetInfo="NAM scaricato. Per generare automaticamente RHYTHM / MAIN / LEAD importa prima un template .prst "+dev+".";
+        List<ToneLogic.GeneratedScene> scenes=ToneLogic.buildSnapTonePresetsAutomatic(dev,snap,q,profile.name+" "+profile.recipe+" "+ToneLogic.blob(tone));
+        for(int i=0;i<scenes.size();i++) {
+            ToneLogic.GeneratedScene scene=scenes.get(i);int slot=pslot+i;
+            String fileName=String.format(Locale.ROOT,"%02d-%s_%s_%s.prst",slot,ToneLogic.safeName(q),scene.shortLabel,dev);
+            Uri uri=saveDownload(fileName,scene.bytes,"application/octet-stream");
+            lastSceneUris[i]=uri;lastSceneNames[i]=fileName;
+            sceneInfo.append("\n").append(slot).append(" · ").append(scene.summary);
         }
+        String presetInfo="3 preset SnapTone creati automaticamente per lo slot "+snap+":"+sceneInfo;
 
         lastA2Uri=a2Uri;lastA2Name=a2File;lastFallbackNamUri=a1Uri;lastFallbackName=a1File;
         final String a1Info=a1!=null?"✓ disponibile anche A1 Legacy: "+a1.optString("name"):"Nessun A1 Legacy corrispondente trovato; resta disponibile l'A2 selezionato.";
@@ -250,8 +256,7 @@ public class MainActivity extends Activity {
     private void refreshState(){
         String dev=prefs.getString("device","GP50");device.setSelection("GP5".equals(dev)?1:0);
         status.setText("✓ Modalità nativa pronta"+(t3.connected()?" • sessione TONE3000 disponibile":" • TONE3000 opzionale"));
-        StringBuilder s=new StringBuilder();for(String d:new String[]{"GP50","GP5"})if(templateFile(d).exists())s.append(d).append(" ✓  ");
-        templateStatus.setText(s.length()==0?"Nessun template importato (non serve per la modalità nativa).":s.toString());
+        if(templateStatus!=null)templateStatus.setText("✓ Generatore .prst integrato • nessun template richiesto");
     }
 
     private File templateFile(String dev){return new File(getFilesDir(),"template_"+dev+".prst");}
